@@ -578,7 +578,7 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *p
 int main(){
 	double startTime=omp_get_wtime();
 	std::ios::sync_with_stdio(false);
-	freopen("m133-b3.mtx", "r", stdin);
+	freopen("../m133-b3.mtx", "r", stdin);
 	//freopen("ot.txt", "w", stdout);
 	int numCols, numRows, numEdges;
 	double start1, finish2;//, finish1;
