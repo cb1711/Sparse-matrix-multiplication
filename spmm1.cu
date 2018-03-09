@@ -12,13 +12,86 @@ Sparse matrix multiplication on heterogeneous system
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 #include <vector>
+#include <curand.h> 
+#include <time.h>
 
 #define largeNumber 5000000
 #define TRb 256
 #define blocksize 64
 #define gridsize 256
 #define partRow 32
+
 using namespace std;
+
+__global__ void selectPoints(bool *selected,int numRows,int sampleRows,float *randomVals){
+	int tid=blockIdx.x*blockDim.x+threadIdx.x;
+	//int rid=tid
+	while(tid<sampleRows){
+		selected[int(randomVals[tid]*numRows)]=true;
+		tid+=blockDim.x*gridDim.x;
+	}
+}
+
+void sampleGenerate(int *c,int *edges,int *r,int &numRows,int *out_c,int *out_edges,int *out_r,int totalRows, int &sampleSize) {
+
+	//int numRows=100;
+	//int totalRows=1000;
+	size_t n = numRows;
+	curandGenerator_t gen;
+	float *devData, *hostData;
+	/* Allocate n floats on host */
+	hostData = (float *)calloc(n, sizeof(float));
+	/* Allocate n floats on device */
+	cudaMalloc((void **)&devData, n*sizeof(float));
+	/* Create pseudo-random number generator */
+	double sd=omp_get_wtime();
+	curandCreateGenerator(&gen, CURAND_RNG_QUASI_SCRAMBLED_SOBOL32);
+	/* Set seed */	
+	curandSetPseudoRandomGeneratorSeed(gen, sd);
+ 	/* Generate n floats on device */
+ 	curandGenerateUniform(gen, devData, n);
+ 	bool *selected,*hselected;
+ 	hselected=new bool[totalRows];
+ 	cudaMalloc((void**)&selected,sizeof(bool)*totalRows);
+ 	cudaMemset(selected,0,totalRows);
+ 	selectPoints<<<256,64>>>(selected,totalRows,numRows,devData);
+ 	
+ 	cudaDeviceSynchronize();
+ 	
+	cudaMemcpy(hselected, selected, totalRows * sizeof(bool), cudaMemcpyDeviceToHost);
+
+ 	int *indices=new int[totalRows];
+ 	thrust::inclusive_scan(hselected,hselected+totalRows,indices);
+ 	numRows=0;
+
+ 	for(int i=0;i<totalRows;i++){
+ 		
+ 		if(hselected[i]){
+ 			
+ 			int indx=indices[i];
+ 			out_r[indx]=sampleSize;
+ 			numRows++;
+ 			int start=r[i];
+ 			int end=r[i+1];
+ 			for(int j=start;j<end;j++){
+ 				if(hselected[c[j]]){
+ 					out_c[sampleSize]=indices[c[j]];
+ 					out_edges[sampleSize]=edges[c[j]];
+ 					
+ 					sampleSize++;
+ 				}
+ 			}
+ 			//cout<<i<<endl;
+ 		}
+ 	}
+ 	out_r[numRows]=sampleSize;
+ 	
+	curandDestroyGenerator(gen);
+	cudaFree(devData);
+	cudaFree(selected);
+	free(hostData);
+	cout<<"Sample done"<<endl;
+}
 
 int entries = 0;
 /*
@@ -150,9 +223,6 @@ void cpuMultiply(csr mat1, csr mat2, vector<vector<coo> > &out, int numCols, int
 	delete[] temp;
 
 }
-__global__ void entryPrint(){
-	printf("%d \n", entryPt);
-}
 __global__ void aborter(){
 	exit_flag=true;
 }
@@ -239,7 +309,7 @@ __global__ void gpuMultiply(int *mat1_c, int *mat1_r, int *mat1_edges,
 			__syncthreads();
 			int threadPlace = tmat2[0] + tmat1[tidx];
 
-			for (int i = tidx; i<TRb; i += blocksize){
+			for (int i = tidx; i<TRb; i += blocksize){//8=TRb/32
 				if (partOut[bid*TRb + i] != 0){
 					out[threadPlace].row = rid;
 					out[threadPlace].val = partOut[bid*TRb + i];
@@ -383,16 +453,6 @@ int cpuSample(csr mat1, csr mat2, int numCols, int numRows,int part,cudaStream_t
 				temp[id][mat2.columns[k]] += mat2.edges[k] * elem;
 			}
 		}
-		//Write results to out matrix
-		for (int j = 0; j<numCols; j++){
-			if (temp[id][j] != 0){
-				entries++;
-				coo tmp;
-				tmp.column = j;
-				tmp.row = i;
-				tmp.val = temp[id][j];
-			}
-		}
 	}
 	int pgrs=0;
 
@@ -441,22 +501,20 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *p
 	cudaHostGetDevicePointer(&dflg, hflg, 0);
 	bool flag=false;
 	double estimate;
-	double t1,t2;
-	t1=omp_get_wtime();
 	gpuSample<<<gridsize,blocksize,0,stream1>>>(d_mat1_c,d_mat1_r,d_mat1_edges,d_mat1_c, d_mat1_r, d_mat1_edges,numRows, partOut,0,dflg);
 	int cpudone=cpuSample(mat1,mat1,numCols,numRows,numRows,stream1,true);
 	hflg[0]=true;
 	cudaDeviceSynchronize();
 	getProgress<<<1,1,0,stream1>>>(prg,numRows);
-	t2=omp_get_wtime();
+	//t2=omp_get_wtime();
 	cudaDeviceSynchronize();
 	estimate=(cpudone*prg[0])/(numRows*1.0);
 	hflg[0]=false;
-	cout<<"estimate is "<<estimate<<endl;
+	//cout<<"estimate is "<<estimate<<endl;
 	int dir=0;
-	double startSample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,estimate,h_load);
-	double psample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,estimate+.01,h_load);
-	double msample=sample(mat1, d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols, stream1,hflg,dflg,prg,estimate-.01, h_load);
+	double startSample=sample(mat1, d_mat1_c, d_mat1_r, d_mat1_edges, partOut, numRows, numCols, stream1, hflg, dflg, prg, estimate,h_load);
+	double psample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,estimate+.1,h_load);
+	double msample=sample(mat1, d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols, stream1,hflg,dflg,prg,estimate-.1, h_load);
 	if(psample<startSample){
 		dir++;
 		startSample=psample;
@@ -465,7 +523,8 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *p
 		dir--;
 		startSample=msample;
 	}
-	cout<<estimate<<endl;
+	//cout<<estimate<<endl;
+	if(dir!=0){
 	estimate+=dir*.01;
 	while(!flag && estimate>.1 && estimate<.9){	
 		double dSample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,estimate+(dir*0.1),h_load);
@@ -476,6 +535,7 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *p
 		else
 			flag=true;
 		//cout<<dSample<<endl;
+	}
 	}
 	psample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,estimate+.01,h_load);
 	msample=sample(mat1, d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols, stream1,hflg,dflg,prg,estimate-.01, h_load);
@@ -488,9 +548,13 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *p
 		dir=-1;
 		startSample=msample;
 	}
+	else{
+		dir=0;	
+	}
 	estimate+=dir*.01;
 
 	flag=false;
+	if(dir!=0){
 	while(!flag ){
 		double dSample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,estimate+(dir*0.01),h_load);
 		//cout<<estimate<<" "<<startSample<<endl; 		
@@ -501,6 +565,7 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *p
 		}
 		else
 			flag=true;
+	}
 	}
 	cout<<estimate<<endl;
 	return estimate;
@@ -516,14 +581,16 @@ int main(){
 	freopen("m133-b3.mtx", "r", stdin);
 	//freopen("ot.txt", "w", stdout);
 	int numCols, numRows, numEdges;
-	double start1, finish1, finish2;
+	double start1, finish2;//, finish1;
 
 	cin >> numCols >> numRows >> numEdges;
 	/*Matrix on host*/
+	//Generate random sample using curand
+	int smpRows=int(numRows/8);
 	int *h_csr_r = new int[numRows + 1];
 	int *h_csr_c = new int[numEdges];
 	int *h_csr_edges = new int[numEdges];
-	int *h_sample_r=new int[numRows/4+1];
+	int *h_sample_r=new int[smpRows+1];
 	int *h_sample_c = new int[numEdges];
 	int *h_sample_edges = new int[numEdges];
 	/*Format conversion*/
@@ -531,8 +598,7 @@ int main(){
 	h_csr_r[0] = 0;
 	h_sample_r[0]=0;
 	int sampleSize=0;
-	int prevSample=0;
-	int smpRows=int(numRows/4);
+	
 	for (int i = 0; i<numEdges; i++){
 		cin >> h_csr_c[i];
 		h_csr_c[i]--;
@@ -540,28 +606,18 @@ int main(){
 		cin >> curr_row;
 		curr_row--;
 		cin >> h_csr_edges[i];
-		if(curr_row < smpRows && h_csr_c[i]<smpRows){
-			h_sample_c[sampleSize]=h_csr_c[i];
-			h_sample_edges[sampleSize]=h_csr_edges[i];	
-		}
+		//h_csr_edges[i]=1;
 		while (prevRow<curr_row){
 			prevRow++;
 			h_csr_r[prevRow] = i;
-		}
-		while (prevSample<curr_row && curr_row<smpRows){
-			prevSample++;
-			h_sample_r[prevSample] = sampleSize;
-		}
-		if(curr_row < smpRows && h_csr_c[i]<smpRows){
-			sampleSize++;
 		}
 	}
 	while (prevRow<numRows){
 		prevRow++;
 		h_csr_r[prevRow] = numEdges;
 	}
-	h_csr_r[numRows] = numEdges;
-	h_sample_r[numRows/4]=sampleSize;
+	sampleGenerate(h_csr_c,h_csr_edges,h_csr_r,smpRows,h_sample_c,h_sample_edges,h_sample_r,numRows,sampleSize);
+	cout<<sampleSize<<" "<<smpRows<<endl;
 	//Sample generated 
 	/*Matrix converted to csr format*/
 	int *d_population, *load, *d_csr_r, *d_csr_c, *h_load;
@@ -576,7 +632,7 @@ int main(){
 	cudaMalloc(&d_csr_edges, numEdges*sizeof(int));
 	
 	/*Sample on device*/
-	cudaMalloc(&d_sample_r, (numRows/4 + 1)*sizeof(int));
+	cudaMalloc(&d_sample_r, (smpRows + 1)*sizeof(int));
 	cudaMalloc(&d_sample_c, sampleSize*sizeof(int));
 	cudaMalloc(&d_sample_edges, sampleSize*sizeof(int));
 
@@ -597,7 +653,7 @@ int main(){
 
 	cudaDeviceSynchronize();
 	cost_spmv << <256, 32, 32 * sizeof(int) >> >(d_population, d_csr_r, d_csr_c, load,numRows);
-	cudaMemcpyAsync(d_sample_r, h_sample_r, (numRows/4 + 1)*sizeof(int), cudaMemcpyHostToDevice, stream1);
+	cudaMemcpyAsync(d_sample_r, h_sample_r, (smpRows + 1)*sizeof(int), cudaMemcpyHostToDevice, stream1);
 
 	cudaMemcpyAsync(d_sample_c, h_sample_c, sampleSize*sizeof(int), cudaMemcpyHostToDevice, stream2);
 	cudaMemcpyAsync(d_sample_edges, h_sample_edges, sampleSize*sizeof(int), cudaMemcpyHostToDevice, stream3);
@@ -611,8 +667,8 @@ int main(){
 	cudaMemcpyAsync(h_load, load, numRows*sizeof(int), cudaMemcpyDeviceToHost, stream1);
 	cudaDeviceSynchronize();
 	cout << "Done" << endl;
-
 	thrust::inclusive_scan(h_load, h_load + numRows, h_load);
+	
 	int *partOut;
 	cudaMalloc(&partOut, TRb*sizeof(int) * gridsize);//TRb columns and 256  rows dealt with at the same time	
 	cudaDeviceSynchronize();
@@ -622,10 +678,12 @@ int main(){
 	mat2.columns=h_sample_c;
 	mat2.rows=h_sample_r;
 	mat2.edges=h_sample_edges;
-	float percent=sampleSearch(mat2,d_sample_c,d_sample_r,d_sample_edges,partOut,numRows/4,numCols/4,h_load);
-	//percent=100.0/100.0;
-	
-	int workDiv=percent*h_load[numRows-1];
+	float percent=sampleSearch(mat2,d_sample_c,d_sample_r,d_sample_edges,partOut,smpRows,smpRows,h_load);
+	float percent2=sampleSearch(mat2,d_sample_c,d_sample_r,d_sample_edges,partOut,smpRows,smpRows,h_load);
+	//percent=0/100.0;
+	//float percent=0;
+	int workDiv=((percent+percent2)*h_load[numRows-1])/2;
+	//int workDiv=((.45)*h_load[numRows-1]);
 	int part=b_search(0,numRows,h_load,workDiv);
 
 	if(workDiv-h_load[part-1]<h_load[part]-workDiv)
@@ -663,11 +721,16 @@ int main(){
 	cout << i << " " << out[0].size()<<"\n"<<i+out[0].size() << " is the size of output" << endl;
 	
 	/*Call cudaFree */
-
+	
+	/*freopen("out.mtx", "w", stdout);
+	for(int j=0;j<i;j++)
+		cout<<h_out[j].column<<" "<<h_out[j].row<<" "<<h_out[j].val<<endl;
+	for(int j=0;j<out[0].size();j++){
+		cout<<out[0][j].column<<" "<<out[0][j].row<<" "<<out[0][j].val<<endl;
+	}*/
 	cudaStreamDestroy(stream1);
 	cudaStreamDestroy(stream2);
 	cudaStreamDestroy(stream3);
-
 	cudaDeviceReset();
 	double endTime=omp_get_wtime();
 	cout<<"Total time is "<<endTime-startTime<<endl;
