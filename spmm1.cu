@@ -448,9 +448,8 @@ int cpuSample(csr mat1, csr mat2, int numCols, int numRows,int part,cudaStream_t
 		for (int j = start; j<end; j++){
 			int elem = mat1.edges[j];
 			for (int k = mat2.rows[mat1.columns[j]]; k<mat2.rows[mat1.columns[j] + 1]; k++){
-				if (mat2.columns[k] == numCols)//Check for invalid memory access
-					cout << "leak" << endl;
-				temp[id][mat2.columns[k]] += mat2.edges[k] * elem;
+				if (mat2.columns[k]< numCols)//Check for invalid memory access
+				  temp[id][mat2.columns[k]] += mat2.edges[k] * elem;
 			}
 		}
 	}
