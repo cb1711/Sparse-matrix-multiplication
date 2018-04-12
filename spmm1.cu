@@ -31,7 +31,7 @@ __global__ void selectPoints(bool *selected,int numRows,int sampleRows,unsigned 
 	}
 }
 
-void sampleGenerate(int *c,int *edges,int *r,int &numRows,int *out_c,int *out_edges,int *out_r,int totalRows, int &sampleSize) {
+void sampleGenerate(int *c,float *edges,int *r,int &numRows,int *out_c,float *out_edges,int *out_r,int totalRows, int &sampleSize) {
 	size_t n = numRows;
 	curandGenerator_t gen;
 	unsigned int *devData;
@@ -81,13 +81,13 @@ void sampleGenerate(int *c,int *edges,int *r,int &numRows,int *out_c,int *out_ed
 * CSR format struct
 */
 struct csr{
-	int *columns, *rows, *edges;
+	int *columns, *rows;float *edges;
 };
 /*
 * COO format struct
 */
 struct coo{
-	int column, row, val;
+	int column, row; float val;
 };
 __device__ int entryPt = 0;
 
@@ -164,11 +164,11 @@ int b_search(int start,int ender,long long *arr,long long val){
 */
 
 void cpuMultiply(csr mat1, csr mat2, vector<vector<coo> > &out, int numCols, int numRows, int numElem,int part){
-	int **temp;
+	float **temp;
 	int threads = omp_get_max_threads();
-	temp = new int*[threads];
+	temp = new float*[threads];
 	for (int i = 0; i<threads; i++)
-		temp[i] = new int[numCols];
+		temp[i] = new float[numCols];
 #pragma omp parallel for schedule(dynamic,100)
 	for (int i = 0; i<part; i++){
 		int id = omp_get_thread_num();
@@ -179,7 +179,7 @@ void cpuMultiply(csr mat1, csr mat2, vector<vector<coo> > &out, int numCols, int
 		int end = mat1.rows[i + 1];
 		//Main multiplication part
 		for (int j = start; j<end; j++){
-			int elem = mat1.edges[j];
+			float elem = mat1.edges[j];
 			for (int k = mat2.rows[mat1.columns[j]]; k<mat2.rows[mat1.columns[j] + 1]; k++){
 				if (mat2.columns[k] == numCols)//Check for invalid memory access
 					cout << "leak" << endl;
@@ -210,8 +210,8 @@ __global__ void aborter(){
 	exit_flag=true;
 }
 
-__global__ void gpuMultiply(int *mat1_c, int *mat1_r, int *mat1_edges,
-			    int *mat2_c, int *mat2_r, int *mat2_edges, coo *out, int numRows, int *partOut,int part){
+__global__ void gpuMultiply(int *mat1_c, int *mat1_r, float *mat1_edges,
+			    int *mat2_c, int *mat2_r, float *mat2_edges, coo *out, int numRows, float *partOut,int part){
 	
 	//identify the rows to be processed
 	int bid = blockIdx.x;
@@ -219,7 +219,7 @@ __global__ void gpuMultiply(int *mat1_c, int *mat1_r, int *mat1_edges,
 	int rid = bid+part;//row being processed
 	//shared memory arrays
 	__shared__ int tmat1[blocksize];//Decide the size of array
-	__shared__ int tmat2[blocksize];
+	__shared__ float tmat2[blocksize];
 	while (rid<numRows){
 		int start = mat1_r[rid];
 		int end = mat1_r[rid + 1];
@@ -290,7 +290,7 @@ __global__ void gpuMultiply(int *mat1_c, int *mat1_r, int *mat1_edges,
 				tmat2[0] = atomicAdd(&entryPt, mx);
 			
 			__syncthreads();
-			int threadPlace = tmat2[0] + tmat1[tidx];
+			int threadPlace = int(tmat2[0]) + tmat1[tidx];
 			__syncthreads();
 			for (int i = tidx; i<TRb; i += blocksize){//8=TRb/32
 				if (partOut[bid*TRb + i] != 0){
@@ -310,8 +310,8 @@ __global__ void gpuMultiply(int *mat1_c, int *mat1_r, int *mat1_edges,
 		__syncthreads();
 	}
 }
-__global__ void gpuSample(int *mat1_c, int *mat1_r, int *mat1_edges,
-			    int *mat2_c, int *mat2_r, int *mat2_edges, int numRows,int *partOut,int part,bool *flg){
+__global__ void gpuSample(int *mat1_c, int *mat1_r, float *mat1_edges,
+			    int *mat2_c, int *mat2_r, float *mat2_edges, int numRows,float *partOut,int part,bool *flg){
 
 	//identify the rows to be processed
 	int bid = blockIdx.x;
@@ -319,7 +319,7 @@ __global__ void gpuSample(int *mat1_c, int *mat1_r, int *mat1_edges,
 	int rid = bid+part;//row being processed
 	//shared memory arrays
 	__shared__ int tmat1[smpBloxx];//Decide the size of array
-	__shared__ int tmat2[smpBloxx];
+	__shared__ float tmat2[smpBloxx];
 	while (rid<numRows){
 		int start = mat1_r[rid];
 		int end = mat1_r[rid + 1];
@@ -400,12 +400,12 @@ __global__ void gpuSample(int *mat1_c, int *mat1_r, int *mat1_edges,
 
 
 int cpuSample(csr mat1, csr mat2, int numCols, int numRows,int part,cudaStream_t &stream1,bool bypass){
-	int **temp;
+	float **temp;
 	int threads = omp_get_max_threads();
-	temp = new int*[threads];
+	temp = new float*[threads];
 	int *progress=new int[threads];
 	for (int i = 0; i<threads; i++)
-		temp[i] = new int[numCols];
+		temp[i] = new float[numCols];
 	volatile bool flag=false;
 	vector <vector<coo> > out(omp_get_max_threads());
 	#pragma omp parallel
@@ -425,7 +425,7 @@ int cpuSample(csr mat1, csr mat2, int numCols, int numRows,int part,cudaStream_t
 		int end = mat1.rows[i + 1];
 		//Main multiplication part
 		for (int j = start; j<end; j++){
-			int elem = mat1.edges[j];
+			float elem = mat1.edges[j];
 			for (int k = mat2.rows[mat1.columns[j]]; k<mat2.rows[mat1.columns[j] + 1]; k++){
 				if (mat2.columns[k]< numCols)//Check for invalid memory access
 				  temp[id][mat2.columns[k]] += mat2.edges[k] * elem;
@@ -457,7 +457,7 @@ float  timeEstimate(double t,double cpuDone,double gpuDone){
 	else
 		return double(t/left);
 }
-double sample(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *partOut,int numRows,int numCols,cudaStream_t &stream1,bool *hflg,bool *dflg,float *prg,float percent,long long *load){
+double sample(csr mat1,int *d_mat1_c,int *d_mat1_r,float *d_mat1_edges,float *partOut,int numRows,int numCols,cudaStream_t &stream1,bool *hflg,bool *dflg,float *prg,float percent,long long *load){
 	double t1,t2;
 	int workDiv=percent*load[numRows-1];
 	int part=b_search(0,numRows,load,workDiv);
@@ -478,7 +478,7 @@ double sample(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *partOu
 	return t2-t1;
 }
 
-float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *partOut,int numRows,int numCols,long long *h_load){
+float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,float *d_mat1_edges,float *partOut,int numRows,int numCols,long long *h_load){
 	cudaStream_t stream1;
 	cudaStreamCreate(&stream1);
 	float *prg;
@@ -568,7 +568,7 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *p
 int main(){
 	double startTime=omp_get_wtime();
 	std::ios::sync_with_stdio(false);
-	freopen("../soc.mtx", "r", stdin);
+	freopen("../consph.mtx", "r", stdin);
 
 	int numCols, numRows, numEdges;
 	double start1, finish2;//, finish1;
@@ -579,10 +579,10 @@ int main(){
 	int smpRows=int(numRows/8);
 	int *h_csr_r = new int[numRows + 1];
 	int *h_csr_c = new int[numEdges];
-	int *h_csr_edges = new int[numEdges];
+	float *h_csr_edges = new float[numEdges];
 	int *h_sample_r=new int[smpRows+1];
 	int *h_sample_c = new int[numEdges];
-	int *h_sample_edges = new int[numEdges];
+	float *h_sample_edges = new float[numEdges];
 	/*Format conversion*/
 	int prevRow = 0;
 	h_csr_r[0] = 0;
@@ -595,10 +595,10 @@ int main(){
 		int curr_row;
 		cin >> curr_row;
 		curr_row--;
-		//cin >> h_csr_edges[i];
-		float x;
-		cin>>x;
-		h_csr_edges[i]=1;
+		cin >> h_csr_edges[i];
+		//float x;
+		//cin>>x;
+		//h_csr_edges[i]=1;
 		while (prevRow<curr_row){
 			prevRow++;
 			h_csr_r[prevRow] = i;
@@ -614,19 +614,20 @@ int main(){
 	//Sample generated 
 	/*Matrix converted to csr format*/
 	int   *d_csr_r, *d_csr_c,*load,*d_population, *h_load;
-	int *d_csr_edges,*d_sample_r,*d_sample_c,*d_sample_edges;
+	int *d_sample_r,*d_sample_c;
+	float *d_csr_edges,*d_sample_edges;
 	cudaMalloc(&load, numRows*sizeof(int));
 	cudaMalloc(&d_population, numRows*sizeof(int));
 
 	/*Matrix on device*/
 	cudaMalloc(&d_csr_r, (numRows + 1)*sizeof(int));
 	cudaMalloc(&d_csr_c, numEdges*sizeof(int));
-	cudaMalloc(&d_csr_edges, numEdges*sizeof(int));
+	cudaMalloc(&d_csr_edges, numEdges*sizeof(float));
 	
 	/*Sample on device*/
 	cudaMalloc(&d_sample_r, (smpRows + 1)*sizeof(int));
 	cudaMalloc(&d_sample_c, sampleSize*sizeof(int));
-	cudaMalloc(&d_sample_edges, sampleSize*sizeof(int));
+	cudaMalloc(&d_sample_edges, sampleSize*sizeof(float));
 
 	cout<<numEdges<<" "<<numRows<<" are the number of edges and rows"<<endl;
 	// cudaMemcpy(destination,source,size, cudaMemcpy* )
@@ -648,13 +649,13 @@ int main(){
 	cudaMemcpyAsync(d_sample_r, h_sample_r, (smpRows + 1)*sizeof(int), cudaMemcpyHostToDevice, stream1);
 
 	cudaMemcpyAsync(d_sample_c, h_sample_c, sampleSize*sizeof(int), cudaMemcpyHostToDevice, stream2);
-	cudaMemcpyAsync(d_sample_edges, h_sample_edges, sampleSize*sizeof(int), cudaMemcpyHostToDevice, stream3);
+	cudaMemcpyAsync(d_sample_edges, h_sample_edges, sampleSize*sizeof(float), cudaMemcpyHostToDevice, stream3);
 
 
 	cudaDeviceSynchronize();
 
 	cout << cudaGetErrorString(cudaGetLastError()) << endl;
-	cudaMemcpyAsync(d_csr_edges, h_csr_edges, numEdges*sizeof(int), cudaMemcpyHostToDevice, stream2);
+	cudaMemcpyAsync(d_csr_edges, h_csr_edges, numEdges*sizeof(float), cudaMemcpyHostToDevice, stream2);
 
 	cudaMemcpyAsync(h_load, load, numRows*sizeof(int), cudaMemcpyDeviceToHost, stream1);
 	cudaDeviceSynchronize();
@@ -667,8 +668,8 @@ int main(){
 	
 	thrust::inclusive_scan(total_load, total_load + numRows, total_load);
         
-	int *partOut;
-	cudaMalloc(&partOut, TRb*sizeof(int) * gridsize);//TRb columns and 256  rows dealt with at the same time	
+	float *partOut;
+	cudaMalloc(&partOut, TRb*sizeof(float) * gridsize);//TRb columns and 256  rows dealt with at the same time	
 	cudaDeviceSynchronize();
 	cout<<endl;
 	csr mat2;
