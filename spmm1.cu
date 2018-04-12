@@ -16,7 +16,7 @@ Sparse matrix multiplication on heterogeneous system
 #include <time.h>
 
 #define largeNumber 5000000
-#define TRb 256
+#define TRb 1536
 #define blocksize 64
 #define gridsize 256
 #define smpBloxx 64
@@ -291,7 +291,7 @@ __global__ void gpuMultiply(int *mat1_c, int *mat1_r, int *mat1_edges,
 			
 			__syncthreads();
 			int threadPlace = tmat2[0] + tmat1[tidx];
-
+			__syncthreads();
 			for (int i = tidx; i<TRb; i += blocksize){//8=TRb/32
 				if (partOut[bid*TRb + i] != 0){
 					out[threadPlace].row = rid;
@@ -431,7 +431,7 @@ int cpuSample(csr mat1, csr mat2, int numCols, int numRows,int part,cudaStream_t
 				  temp[id][mat2.columns[k]] += mat2.edges[k] * elem;
 			}
 		}
-		for (int j = 0; j<numCols/8; j++){
+		for (int j = 0; j<numCols/3.5; j++){
 			if (temp[id][j] != 0){
 				coo tmp;
 				tmp.column = j;
@@ -463,7 +463,7 @@ double sample(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *partOu
 	int part=b_search(0,numRows,load,workDiv);
 	
 	part=(percent*numRows*3+part)/4.0;
-	cout<<"sample part is "<<part<<" percent is "<<percent<< endl;
+	//cout<<"sample part is "<<part<<" percent is "<<percent<< endl;
 	if(workDiv-load[part-1]<load[part]-workDiv)
 		part--;
 	t1=omp_get_wtime();
@@ -496,12 +496,13 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *p
 	//t2=omp_get_wtime();
 	cudaDeviceSynchronize();
 	estimate=(cpudone*1.0)/(cpudone+prg[0]);
+	estimate=min(max(0.0,estimate),1.0);
 	hflg[0]=false;
 	//cout<<"estimate is "<<estimate<<endl;
 	int dir=0;
 	double startSample=sample(mat1, d_mat1_c, d_mat1_r, d_mat1_edges, partOut, numRows, numCols, stream1, hflg, dflg, prg, estimate,h_load);
-	double psample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,estimate+.1,h_load);
-	double msample=sample(mat1, d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols, stream1,hflg,dflg,prg,estimate-.1, h_load);
+	double psample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,min(estimate+.1,1.0),h_load);
+	double msample=sample(mat1, d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols, stream1,hflg,dflg,prg,max(estimate-.1,0.0), h_load);
 	if(psample<startSample){
 		dir++;
 		startSample=psample;
@@ -515,7 +516,7 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *p
 	estimate+=dir*.01;
 	estimate=min(max(0.0,estimate),1.0);
 	while(!flag && estimate>.1 && estimate<.9){	
-		double dSample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,estimate+(dir*0.1),h_load);
+		double dSample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,max(min(estimate+(dir*0.1),1.0),0.0),h_load);
 		if(dSample<startSample){
 			startSample=dSample;
 			estimate+=.1*dir;
@@ -546,18 +547,17 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,int *d_mat1_edges,int *p
 	flag=false;
 	if(dir!=0){
 		while(!flag && estimate>0 &&  estimate<1 ){
-			double dSample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,estimate+(dir*0.01),h_load);
-			//cout<<estimate<<" "<<startSample<<endl; 		
-			//cout<<estimate+dir*0.01<<" "<<dSample<<endl;
+			double dSample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,max(min(estimate+(dir*0.01),1.0),0.0),h_load);
 			if(dSample<startSample){
 				startSample=dSample;
 				estimate+=.01*dir;
+				estimate=max(min(estimate,1.0),0.0);
 			}
 			else
 				flag=true;
 		}
 	}
-	cout<<estimate<<" is the first estimate"<<endl;
+	//cout<<estimate<<" is the first estimate"<<endl;
 	return estimate;
 }
 
@@ -595,8 +595,10 @@ int main(){
 		int curr_row;
 		cin >> curr_row;
 		curr_row--;
-		cin >> h_csr_edges[i];
-		//h_csr_edges[i]=1;
+		//cin >> h_csr_edges[i];
+		float x;
+		cin>>x;
+		h_csr_edges[i]=1;
 		while (prevRow<curr_row){
 			prevRow++;
 			h_csr_r[prevRow] = i;
@@ -677,15 +679,20 @@ int main(){
 
 	percent=min(percent,1.0);
 	cout<<percent<<" is the split"<<endl;
-	cudaFree(d_sample_c);
+	//percent=;
+	/*cudaFree(d_sample_c);
 	cudaFree(d_sample_r);
 	cudaFree(d_sample_edges);
+	*/
 	
 	long long workDiv=((percent)*total_load[numRows-1]);
 	cout<<workDiv<<"is the division of work"<<endl;
-
+	
 	int part=b_search(0,numRows,total_load,workDiv);
-	part=(part+3*numRows*percent)/4;
+	part=(part+7*numRows*percent)/8;
+	//part=numRows*percent;
+
+	cout<<numRows*percent<<" "<<part<<endl;
 	if(workDiv-total_load[part-1]<total_load[part]-workDiv)
 		part--;
 	cout<<part<<" is the part"<<endl;
@@ -715,22 +722,23 @@ int main(){
 	cudaMallocManaged(&gpuPart,1*sizeof(int));
 	entryPoint<<<1,1>>>(gpuPart);
 	cudaDeviceSynchronize();
-	//cout << gpuPart[0] << " " << out[0].size()<<"\n"<< gpuPart[0]+out[0].size() << " is the size of output" << endl;
+	
+	double endTime=omp_get_wtime();
+	cout<<"Total time is "<<endTime-startTime<<endl;
 	
 	/*Call cudaFree */
-	
-	///freopen("out.mtx", "w", stdout);
-	//for(int j=0;j< gpuPart[0];j++)
-	//	cout<<h_out[j].column<<" "<<h_out[j].row<<" "<<h_out[j].val<<endl;
 	/*
-	  for(int j=0;j<out[0].size();j++){
+	freopen("out.mtx", "w", stdout);
+	cout << numRows<<" "<<numCols<<" "<<gpuPart[0]+ out[0].size()<< endl;
+	for(int j=0;j< gpuPart[0];j++)
+		cout<<h_out[j].column<<" "<<h_out[j].row<<" "<<h_out[j].val<<endl;
+	
+	for(int j=0;j<out[0].size();j++)
 		cout<<out[0][j].column<<" "<<out[0][j].row<<" "<<out[0][j].val<<endl;
-		}*/
+	*/
 	cudaStreamDestroy(stream1);
 	cudaStreamDestroy(stream2);
 	cudaStreamDestroy(stream3);
 	cudaDeviceReset();
-	double endTime=omp_get_wtime();
-	cout<<"Total time is "<<endTime-startTime<<endl;
 	return 0;
 }
