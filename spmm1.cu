@@ -18,7 +18,7 @@ Sparse matrix multiplication on heterogeneous system
 #define largeNumber 5000000
 #define TRb 1536
 #define blocksize 64
-#define gridsize 256
+#define gridsize 1024
 #define smpBloxx 64
 using namespace std;
 
@@ -66,8 +66,7 @@ void sampleGenerate(int *c,float *edges,int *r,int &numRows,int *out_c,float *ou
  				if(hselected[c[j]]){
  					out_c[sampleSize]=indices[c[j]];
  					out_edges[sampleSize]=edges[c[j]];
- 					
- 					sampleSize++;
+      					sampleSize++;
  				}
  			}
  		}
@@ -169,7 +168,7 @@ void cpuMultiply(csr mat1, csr mat2, vector<vector<coo> > &out, int numCols, int
 	temp = new float*[threads];
 	for (int i = 0; i<threads; i++)
 		temp[i] = new float[numCols];
-#pragma omp parallel for schedule(dynamic,100)
+#pragma omp parallel for schedule(dynamic,700)
 	for (int i = 0; i<part; i++){
 		int id = omp_get_thread_num();
 		//Set the entries to all zero
@@ -290,6 +289,7 @@ __global__ void gpuMultiply(int *mat1_c, int *mat1_r, float *mat1_edges,
 				tmat2[0] = atomicAdd(&entryPt, mx);
 			
 			__syncthreads();
+			
 			int threadPlace = int(tmat2[0]) + tmat1[tidx];
 			__syncthreads();
 			for (int i = tidx; i<TRb; i += blocksize){//8=TRb/32
@@ -301,6 +301,7 @@ __global__ void gpuMultiply(int *mat1_c, int *mat1_r, float *mat1_edges,
 				}
 			}
 			__syncthreads();
+
 			stepStart += TRb;
 			stepEnd += TRb;
 			if (stepEnd>numRows)
@@ -431,7 +432,8 @@ int cpuSample(csr mat1, csr mat2, int numCols, int numRows,int part,cudaStream_t
 				  temp[id][mat2.columns[k]] += mat2.edges[k] * elem;
 			}
 		}
-		for (int j = 0; j<numCols/3.5; j++){
+		int push_col=numCols/1.3;//Adjusted to get better division of work
+		for (int j = 0; j<push_col; j++){
 			if (temp[id][j] != 0){
 				coo tmp;
 				tmp.column = j;
@@ -527,7 +529,7 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,float *d_mat1_edges,floa
 			flag=true;
 		//cout<<dSample<<endl;
 	}
-	}/*
+	}
 	psample=sample(mat1,d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols,stream1,hflg,dflg,prg,estimate+.01,h_load);
 	msample=sample(mat1, d_mat1_c,d_mat1_r,d_mat1_edges,partOut,numRows,numCols, stream1,hflg,dflg,prg,estimate-.01, h_load);
 	
@@ -543,7 +545,6 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,float *d_mat1_edges,floa
 		dir=0;	
 	}
 	estimate+=dir*.01;
-	 */
 	flag=false;
 	if(dir!=0){
 		while(!flag && estimate>0 &&  estimate<1 ){
@@ -568,8 +569,6 @@ float sampleSearch(csr mat1,int *d_mat1_c,int *d_mat1_r,float *d_mat1_edges,floa
 int main(){
 	double startTime=omp_get_wtime();
 	std::ios::sync_with_stdio(false);
-	freopen("../consph.mtx", "r", stdin);
-
 	int numCols, numRows, numEdges;
 	double start1, finish2;//, finish1;
 
@@ -677,7 +676,7 @@ int main(){
 	mat2.rows=h_sample_r;
 	mat2.edges=h_sample_edges;
 	float percent=sampleSearch(mat2,d_sample_c,d_sample_r,d_sample_edges,partOut,smpRows,smpRows,total_load);
-
+      
 	percent=min(percent,1.0);
 	cout<<percent<<" is the split"<<endl;
 	//percent=;
@@ -690,13 +689,14 @@ int main(){
 	cout<<workDiv<<"is the division of work"<<endl;
 	
 	int part=b_search(0,numRows,total_load,workDiv);
-	part=(part+7*numRows*percent)/8;
+	part=(part+3*numRows*percent)/4;
 	//part=numRows*percent;
-
+	//part=0;
 	cout<<numRows*percent<<" "<<part<<endl;
 	if(workDiv-total_load[part-1]<total_load[part]-workDiv)
 		part--;
 	cout<<part<<" is the part"<<endl;
+	//part=0;
 	csr mat1;
 	mat1.columns = h_csr_c;
 	mat1.rows = h_csr_r;
@@ -706,18 +706,20 @@ int main(){
 	//Allocate pinned memory which can be written from the gpu/device
 	//float cpu_flops=2*2.7*16;
 	//float gpu_flops=768*.8;
-	cudaHostAlloc((void**)&h_out, 50 * numEdges*sizeof(coo), cudaHostAllocMapped);
+	cudaHostAlloc((void**)&h_out, 30 * numEdges*sizeof(coo), cudaHostAllocMapped);
 	cudaHostGetDevicePointer(&d_out, h_out, 0);
 	start1 = omp_get_wtime();
 	
 	gpuMultiply <<< gridsize, blocksize >>>(d_csr_c, d_csr_r, d_csr_edges, d_csr_c, d_csr_r, d_csr_edges, d_out, numRows, partOut,part);
+	
+	//cudaDeviceSynchronize();
+	//double startg=omp_get_wtime();
 	cpuMultiply(mat1, mat1, out, numCols, numRows, numEdges,part);
 	cudaDeviceSynchronize();
 	finish2 = omp_get_wtime();
-        
+	//cout<<startg-start1<<" "<<finish2-startg<<endl;    
 	cout << "Done with time "<<finish2 - start1 << endl;
-	//entryPrint << <1, 1 >> >();
-	cudaDeviceSynchronize();
+    
         
 	int *gpuPart;
 	cudaMallocManaged(&gpuPart,1*sizeof(int));
